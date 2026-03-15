@@ -162,6 +162,10 @@ export class InputHandler {
         if (keyCode == 9) {
             event.preventDefault();
         }
+        // Prevent default browser behavior for F1-F6
+        if (keyCode >= 112 && keyCode <= 117) {
+            event.preventDefault();
+        }
         if (this.checkCaptureInput(event, InputType.Key, keyCode)) {
             return;
         }

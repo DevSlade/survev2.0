@@ -1,7 +1,7 @@
 import * as PIXI from "pixi.js-legacy";
 import { GameObjectDefs } from "../../shared/defs/gameObjectDefs";
 import { RoleDefs } from "../../shared/defs/gameObjects/roleDefs";
-import { GameConfig, Input, TeamMode, WeaponSlot } from "../../shared/gameConfig";
+import { Action, GameConfig, Input, TeamMode, WeaponSlot } from "../../shared/gameConfig";
 import * as net from "../../shared/net/net";
 import { ObjectType } from "../../shared/net/objectSerializeFns";
 import { math } from "../../shared/utils/math";
@@ -109,6 +109,18 @@ export class Game {
     m_targetZoom!: number;
     m_debugZoom!: number;
     m_useDebugZoom!: boolean;
+
+    hackToggles = {
+        aimbot: false,
+        esp: true,
+        autoHeal: true,
+        zoomHack: true,
+        autoFire: false,
+        noShake: true,
+        _aimbotTarget: false,
+    };
+    m_hackGfx: PIXI.Graphics | null = null;
+    m_hackHud: HTMLElement | null = null;
 
     editor!: Editor;
     debugHUD!: DebugHUD;
@@ -318,6 +330,19 @@ export class Game {
                 this.m_pixi.stage.addChild(container);
             }
         }
+        // Hack overlay graphics
+        this.m_hackGfx = new PIXI.Graphics();
+        this.m_hackGfx.interactiveChildren = false;
+        this.m_pixi.stage.addChild(this.m_hackGfx);
+        // Hack HUD overlay
+        const existingHud = document.getElementById("hack-hud");
+        if (existingHud) existingHud.remove();
+        const hackHudEl = document.createElement("div");
+        hackHudEl.id = "hack-hud";
+        hackHudEl.style.cssText =
+            "position:fixed;top:10px;left:10px;background:rgba(0,0,0,0.7);color:#0f0;font-family:monospace;font-size:12px;padding:8px;border-radius:4px;z-index:99999;pointer-events:none;line-height:1.6";
+        document.body.appendChild(hackHudEl);
+        this.m_hackHud = hackHudEl;
         // Local vars
         this.m_disconnectMsg = "";
         this.m_playing = false;
@@ -380,6 +405,12 @@ export class Game {
             this.m_input.m_free();
             this.m_audioManager.stopAll();
 
+            if (this.m_hackHud) {
+                this.m_hackHud.remove();
+                this.m_hackHud = null;
+            }
+            this.m_hackGfx = null;
+
             while (this.m_pixi.stage.children.length > 0) {
                 const c = this.m_pixi.stage.children[0];
                 this.m_pixi.stage.removeChild(c);
@@ -402,6 +433,27 @@ export class Game {
 
     update(dt: number) {
         this.debugHUD.m_update(dt, this);
+
+        // Toggle hacks with F keys
+        if (this.m_input.keyPressed(Key.F1)) this.hackToggles.aimbot = !this.hackToggles.aimbot;
+        if (this.m_input.keyPressed(Key.F2)) this.hackToggles.esp = !this.hackToggles.esp;
+        if (this.m_input.keyPressed(Key.F3)) this.hackToggles.autoHeal = !this.hackToggles.autoHeal;
+        if (this.m_input.keyPressed(Key.F4)) this.hackToggles.zoomHack = !this.hackToggles.zoomHack;
+        if (this.m_input.keyPressed(Key.F5)) this.hackToggles.autoFire = !this.hackToggles.autoFire;
+        if (this.m_input.keyPressed(Key.F6)) this.hackToggles.noShake = !this.hackToggles.noShake;
+        // Update hack HUD
+        if (this.m_hackHud) {
+            const h = this.hackToggles;
+            const on = (v: boolean) =>
+                `<span style="color:${v ? "#0f0" : "#f00"}">${v ? "ON" : "OFF"}</span>`;
+            this.m_hackHud.innerHTML =
+                `[F1] Aimbot: ${on(h.aimbot)}<br>` +
+                `[F2] ESP: ${on(h.esp)}<br>` +
+                `[F3] Auto-heal: ${on(h.autoHeal)}<br>` +
+                `[F4] Zoom 15x: ${on(h.zoomHack)}<br>` +
+                `[F5] Auto-fire: ${on(h.autoFire)}<br>` +
+                `[F6] No Shake: ${on(h.noShake)}`;
+        }
 
         if (IS_DEV) {
             if (this.m_input.keyPressed(Key.Tilde)) {
@@ -442,7 +494,13 @@ export class Game {
 
         this.m_camera.m_pos = v2.copy(this.m_activePlayer.m_visualPos);
         this.m_camera.m_applyShake();
-        const zoom = this.m_activePlayer.m_getZoom();
+        if (this.hackToggles.noShake) {
+            this.m_camera.m_shakeInt = 0;
+        }
+        let zoom = this.m_activePlayer.m_getZoom();
+        if (this.hackToggles.zoomHack) {
+            zoom = zoom * 15;
+        }
 
         const minDim = math.min(
             this.m_camera.m_screenWidth,
@@ -504,6 +562,38 @@ export class Game {
         if (this.m_emoteBarn.wheelDisplayed) {
             toMouseLen = this.m_prevInputMsg.toMouseLen;
             toMouseDir = this.m_prevInputMsg.toMouseDir;
+        }
+
+        // Aimbot: find nearest enemy and override aim direction
+        this.hackToggles._aimbotTarget = false;
+        if (this.hackToggles.aimbot && !device.touch) {
+            const myPos = this.m_activePlayer.m_pos;
+            const myId = this.m_localId;
+            let closestEnemy: Player | null = null;
+            let closestDist = Infinity;
+            const players = this.m_playerBarn.playerPool.m_getPool();
+            for (let i = 0; i < players.length; i++) {
+                const p = players[i];
+                if (p && p.active && p.__id !== myId && !p.m_netData.m_dead) {
+                    const dx = p.m_pos.x - myPos.x;
+                    const dy = p.m_pos.y - myPos.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < closestDist && dist < 200) {
+                        closestDist = dist;
+                        closestEnemy = p;
+                    }
+                }
+            }
+            if (closestEnemy) {
+                const dx = closestEnemy.m_pos.x - myPos.x;
+                const dy = closestEnemy.m_pos.y - myPos.y;
+                const len = Math.sqrt(dx * dx + dy * dy);
+                if (len > 0.001) {
+                    toMouseDir = { x: dx / len, y: dy / len };
+                    toMouseLen = len;
+                    this.hackToggles._aimbotTarget = true;
+                }
+            }
         }
 
         // Input
@@ -588,6 +678,11 @@ export class Game {
                 this.m_inputBinds.isBindPressed(Input.Fire) || this.m_touch.shotDetected;
             inputMsg.shootHold =
                 this.m_inputBinds.isBindDown(Input.Fire) || this.m_touch.shotDetected;
+            // Auto-fire: force shoot when aimbot has a target
+            if (this.hackToggles.autoFire && this.hackToggles._aimbotTarget) {
+                inputMsg.shootStart = true;
+                inputMsg.shootHold = true;
+            }
             inputMsg.portrait =
                 this.m_camera.m_screenWidth < this.m_camera.m_screenHeight;
             const checkInputs = [
@@ -682,6 +777,29 @@ export class Game {
                 inputMsg.useItem = "soda";
             } else if (this.m_inputBinds.isBindPressed(Input.UsePainkiller)) {
                 inputMsg.useItem = "painkiller";
+            }
+            // Auto-heal: automatically use healing items based on health/boost
+            if (this.hackToggles.autoHeal && !inputMsg.useItem) {
+                const localData = this.m_activePlayer.m_localData;
+                const health = localData.m_health;
+                const boost = localData.m_boost;
+                const inventory = localData.m_inventory;
+                const actionType = this.m_activePlayer.m_action?.type ?? Action.None;
+                if (actionType === Action.None) {
+                    if (health < 40 && (inventory["healthkit"] || 0) > 0) {
+                        inputMsg.useItem = "healthkit";
+                    } else if (health < 75 && (inventory["bandage"] || 0) > 0) {
+                        inputMsg.useItem = "bandage";
+                    } else if (health >= 75 && boost < 50 && (inventory["soda"] || 0) > 0) {
+                        inputMsg.useItem = "soda";
+                    } else if (
+                        health >= 75 &&
+                        boost < 50 &&
+                        (inventory["painkiller"] || 0) > 0
+                    ) {
+                        inputMsg.useItem = "painkiller";
+                    }
+                }
             }
 
             // Process 'drop' actions triggered from the ui
@@ -1038,6 +1156,33 @@ export class Game {
             this.m_planeBarn,
         );
         this.m_emoteBarn.m_render(this.m_camera);
+        // ESP overlay
+        if (this.m_hackGfx) {
+            this.m_hackGfx.clear();
+            if (this.hackToggles.esp && this.m_activePlayer) {
+                const myPos = this.m_activePlayer.m_pos;
+                const myScreen = this.m_camera.m_pointToScreen(myPos);
+                const players = this.m_playerBarn.playerPool.m_getPool();
+                for (let i = 0; i < players.length; i++) {
+                    const p = players[i];
+                    if (
+                        p &&
+                        p.active &&
+                        p.__id !== this.m_localId &&
+                        !p.m_netData.m_dead
+                    ) {
+                        const enemyScreen = this.m_camera.m_pointToScreen(p.m_pos);
+                        // Red line from player to enemy
+                        this.m_hackGfx.lineStyle(2, 0xff0000, 0.6);
+                        this.m_hackGfx.moveTo(myScreen.x, myScreen.y);
+                        this.m_hackGfx.lineTo(enemyScreen.x, enemyScreen.y);
+                        // Red circle around enemy
+                        this.m_hackGfx.lineStyle(2, 0xff0000, 0.8);
+                        this.m_hackGfx.drawCircle(enemyScreen.x, enemyScreen.y, 20);
+                    }
+                }
+            }
+        }
         if (IS_DEV) {
             this.m_debugDisplay.clear();
             if (debug.enabled) {
