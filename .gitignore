@@ -21,6 +21,7 @@ dist/
 
 # Node modules
 node_modules/
+package-lock.json
 
 user-data/
 .idea/
